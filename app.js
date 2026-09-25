@@ -183,6 +183,7 @@ const tOf = r => { const f = fpsOf(r.video_id); return f ? r.frame_id / f : Numb
 const TASK_LABEL = { kis: 'KIS', vqa: 'Q&A', trake: 'TRAKE' };
 const S = {
   task: 'kis',
+  trakeUndo: (() => { try { return JSON.parse(store.get('aicTrakeUndo') || 'null'); } catch { return null; } })(), // danh sách trước lần nộp TRAKE gần nhất
   family: store.get('aicFamily', 'standard'),
   fusion: store.get('aicFusion', 'late'),
   mm: store.get('aicMM', 'only_visual'),
@@ -650,6 +651,7 @@ function hoverStart(card) {
     v.dataset.play = '1';
     if (v.dataset.v !== r.video_id) setVideoSrc(v, r.video_id, HP.clip[0]);
     else seekWhenReady(v, HP.clip[0]);
+    setRate(v, holdRate() || 1);
     v.play().catch(() => {});
   }, HOVER_DELAY);
 }
@@ -823,7 +825,7 @@ function openVideo(v, t = 0, opts = {}) {
       if (VM.v === v && src) $('#vmBadge').textContent = `bắt đầu ${fmtTime(VM.t0, true)} · ${src === 'local' ? '📁 từ máy' : '☁ từ server'}`;
     }).catch(() => {});
   }
-  el.playbackRate = Number($('#vmSpeed').value) || 1;
+  setRate(el, holdRate() || vmBaseRate());
   el.play().catch(() => {});
   openOverlay('#videoModal');
   $('#inspQuery').value = opts.q || '';
@@ -867,6 +869,56 @@ function bindVideoDrag() {
 }
 function stepVideo(sec) { const el = $('#vmVideo'); el.pause(); el.currentTime = Math.max(0, Math.min(el.duration || 1e9, el.currentTime + sec)); }
 const stepFrames = n => stepVideo(n / fps25(VM.v));
+const SEEK_STEP = 5; // ← → tua 5 giây, không dừng video
+function seekBy(sec) { const el = $('#vmVideo'); el.currentTime = Math.max(0, Math.min(el.duration || 1e9, el.currentTime + sec)); }
+
+// Giữ Shift: video đang xem (cửa sổ video, hoặc video phát khi rê chuột lên ảnh) chạy x1.5; giữ thêm Z: x2.
+// Nhả Z → về x1.5; nhả Shift → về tốc độ cũ.
+const FAST_RATE = 1.5, FASTER_RATE = 2;
+let shiftFast = false, zFast = false;
+const holdRate = () => (shiftFast ? (zFast ? FASTER_RATE : FAST_RATE) : 0); // 0 = không giữ phím tăng tốc
+const vmBaseRate = () => Number($('#vmSpeed').value) || 1;
+function setRate(v, r) { v.defaultPlaybackRate = r; v.playbackRate = r; } // default…: giữ tốc độ khi video nạp lại nguồn
+function applyShiftSpeed() {
+  const r = holdRate();
+  setRate($('#vmVideo'), r || vmBaseRate());
+  if (HP.el) setRate(HP.el, r || 1);
+  document.body.classList.toggle('fast', r > 0);
+  document.body.classList.toggle('faster', r === FASTER_RATE);
+}
+function onShift(e) {
+  const isShift = e.key === 'Shift', isZ = e.code === 'KeyZ' || (e.key || '').toLowerCase() === 'z';
+  if (!isShift && !isZ) return;
+  const down = e.type === 'keydown';
+  if (isZ && down && !e.shiftKey) return; // Z một mình: không làm gì
+  const inField = e.target.matches('input, textarea, [contenteditable]');
+  // Gõ chữ hoa trong ô nhập của cửa sổ video: bỏ qua. Ngoài lưới thì vẫn tăng tốc video xem trước
+  // (thường vừa gõ truy vấn xong, con trỏ còn trong ô tìm kiếm, rồi rê chuột lên ảnh).
+  if (down && isOpen('#videoModal') && inField) return;
+  // Đang có video xem trước chạy dưới chuột: Shift+Z là tăng tốc, không gõ chữ “Z” vào ô tìm kiếm.
+  if (isZ && down && inField && HP.card?.classList.contains('playing')) e.preventDefault();
+  if (down && e.repeat) return;
+  const before = holdRate();
+  if (isShift) shiftFast = down; else zFast = down;
+  if (holdRate() !== before) applyShiftSpeed();
+}
+
+// Phím trong cửa sổ video: bắt ở pha capture và chặn phím tắt sẵn có của thẻ <video>
+// (nếu không, bấm chuột vào video rồi bấm Space sẽ bị xử lý 2 lần: dừng rồi chạy lại ngay).
+function onVideoKey(e) {
+  if (!isOpen('#videoModal') || isOpen('#lightbox') || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.target.matches('input, textarea, select, [contenteditable]')) return;
+  const el = $('#vmVideo'), k = e.key, lk = k.toLowerCase();
+  if (k === ' ') { if (!e.repeat) { if (el.paused) el.play().catch(() => {}); else el.pause(); } }
+  else if (k === 'ArrowLeft') seekBy(-SEEK_STEP);
+  else if (k === 'ArrowRight') seekBy(SEEK_STEP);
+  else if (lk === 'c') vmAddToCart();
+  else if (lk === 's' && S.task !== 'trake') vmSubmit();
+  else if (lk === 'g') { setVmTab('calc'); $('#vmGoto').focus(); }
+  else if (k.length === 1 && '1234'.includes(k)) { const r = [0.5, 1, 1.5, 2][+k - 1]; $('#vmSpeed').value = String(r); if (!shiftFast) setRate(el, r); }
+  else return;
+  e.preventDefault(); e.stopPropagation();
+}
 
 // Snap ảnh thumbnail về keyframe gần nhất (ảnh chỉ có trên lưới keyframe).
 async function nearestKeyframe(v, f) {
@@ -876,6 +928,19 @@ async function nearestKeyframe(v, f) {
     for (const x of list) if (best === null || Math.abs(x.f - f) < Math.abs(best - f)) best = x.f;
     return best ?? f;
   } catch { return f; }
+}
+// Gõ số frame trong cửa sổ video → nhảy tới đó (dừng lại để xem đúng frame).
+async function vmGotoFrame() {
+  const inp = $('#vmGoto'), raw = inp.value.trim().replace(/^[#f]/i, ''), f = Number(raw);
+  if (!raw || !Number.isSafeInteger(f) || f < 0) { toast('Gõ số frame (số nguyên ≥ 0) rồi Enter.', 'error'); return; }
+  await fpsReady();
+  const fps = fpsOf(VM.v);
+  if (!fps) { toast('Chưa có FPS của video này nên chưa nhảy tới frame được.', 'error'); return; }
+  const el = $('#vmVideo'), t = f / fps + 0.001; // +1ms: rơi đúng vào frame f, không lệch về frame trước
+  if (el.duration && t > el.duration) { toast(`${VM.v} chỉ có khoảng ${Math.floor(el.duration * fps)} frame.`, 'error'); return; }
+  el.pause();
+  el.currentTime = t;
+  inp.value = ''; inp.blur();
 }
 async function currentVideoItem() {
   await fpsReady();
@@ -1077,10 +1142,10 @@ function lbShow() {
 function lbNav(d) { const n = LB.i + d; if (n >= 0 && n < LB.list.length) { LB.i = n; lbShow(); } }
 
 /* ════════════════════ 12. Danh sách nộp (export area) ════════════════════ */
-function addToCart(it, broadcast = true, quiet = false) {
+function addToCart(it, broadcast = true, quiet = false, at = null) {
   if (!it || !it.key) return;
   if (S.cart.some(c => c.key === it.key)) { if (!quiet) { toast(`${it.label} đã có trong danh sách nộp.`); openCart(true); } return; }
-  S.cart.push(it);
+  if (at === null || at >= S.cart.length) S.cart.push(it); else S.cart.splice(Math.max(0, at), 0, it); // at: thả vào đúng vị trí
   openCart(true);
   renderCart();
   if (broadcast) queueSend('ADD_FRAME', toQueueItem(it));
@@ -1095,6 +1160,12 @@ function clearCart(broadcast = true) {
   S.cart = [];
   renderCart();
   if (broadcast) queueSend('CLEAR_QUEUE');
+}
+function moveTo(from, to) { // kéo thả: to = vị trí chèn (0…length) tính trên danh sách trước khi kéo
+  if (from < 0 || from >= S.cart.length || to === from || to === from + 1) return;
+  const [it] = S.cart.splice(from, 1);
+  S.cart.splice(to > from ? to - 1 : to, 0, it);
+  renderCart();
 }
 function moveCart(i, d) {
   const j = i + d;
@@ -1114,7 +1185,7 @@ function renderCart() {
   if (!S.cart.length) {
     list.innerHTML = '<div class="cart-empty">Kéo thả frame vào đây<br>hoặc bấm + / chuột giữa trên ảnh<br>hoặc “Add to Answer” trong cửa sổ video.<br><br>Mục <b>#1</b> là mục được nộp khi bấm Nộp bài.</div>';
   } else {
-    list.innerHTML = S.cart.map((it, i) => `<div class="citem" data-i="${i}">
+    list.innerHTML = S.cart.map((it, i) => `<div class="citem" data-i="${i}" draggable="true" title="Kéo thả để đổi thứ tự">
       <span class="rank">${t === 'trake' ? `E${i + 1}` : i + 1}</span>
       <img data-v="${esc(it.video_id)}" data-f="${it.thumbFrame ?? it.frame_id}" src="${esc(it.src)}" title="Click: mở video · Chuột phải: frame lân cận" draggable="false" alt="">
       <div class="cm"><b title="${esc(it.label)}">${esc(it.label)}</b><span class="muted">⏱ ${fmtTime(it.t, true)}</span>
@@ -1124,6 +1195,73 @@ function renderCart() {
   }
   const keys = new Set(S.cart.map(c => c.key));
   $$('#results .card-f').forEach(c => { const r = S.results[+c.dataset.i]; if (r) c.classList.toggle('in-cart', keys.has(`${r.video_id}/${r.frame_id}`)); });
+  $('#trakeManual').hidden = t !== 'trake';
+  const u = S.trakeUndo, undo = $('#cartUndo');
+  undo.hidden = !(t === 'trake' && u?.items?.length);
+  if (!undo.hidden) {
+    undo.textContent = `↩ Quay lại lần nộp trước (${u.items.length} frame · ${new Date(u.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`;
+    undo.title = `Lấy lại các ứng viên có trong danh sách lúc nộp: ${u.label || ''}`;
+  }
+}
+
+/* ── TRAKE: nộp xong (đúng hay sai) thì dọn danh sách, giữ bản cũ để bấm “↩ Quay lại” ── */
+function snapshotTrake(label) {
+  if (!S.cart.length) return; // danh sách đang trống (vd nộp tay): giữ bản lưu trước đó
+  S.trakeUndo = { items: S.cart.map(it => ({ ...it })), label, at: Date.now() };
+  store.set('aicTrakeUndo', JSON.stringify(S.trakeUndo));
+}
+function restoreTrake() {
+  const u = S.trakeUndo;
+  if (!u?.items?.length) return;
+  const cur = S.cart.slice(), keys = new Set(u.items.map(i => i.key));
+  S.cart = [...u.items, ...cur.filter(c => !keys.has(c.key))]; // mục mới thêm sau khi nộp vẫn giữ, xếp sau
+  u.items.filter(i => !cur.some(c => c.key === i.key)).forEach(i => queueSend('ADD_FRAME', toQueueItem(i)));
+  S.trakeUndo = null; store.del('aicTrakeUndo');
+  openCart(true); renderCart();
+  toast(`Đã lấy lại ${u.items.length} ứng viên như trước lần nộp${u.label ? ` ${u.label}` : ''}.`, 'success');
+}
+
+/* ── TRAKE nộp tay: gõ Video ID + các frame ── */
+function parseFrames(s) {
+  const fs = String(s || '').split(/[\s,;]+/).filter(Boolean).map(Number);
+  return fs.length && fs.every(f => Number.isSafeInteger(f) && f >= 0) ? fs : null;
+}
+function tmPreview() {
+  const raw = $('#tmVideo').value.trim(), fr = $('#tmFrames').value.trim(), el = $('#tmPreview');
+  const v = raw.replace(/\.(mp4|mov|mkv|webm|avi|m4v)$/i, '').toUpperCase(), fs = parseFrames(fr);
+  el.classList.remove('bad');
+  if (!raw && !fr) { el.textContent = 'Frame cách nhau bằng dấu phẩy, đúng thứ tự sự kiện.'; return; }
+  if (!fs) { el.textContent = fr ? 'Frame phải là số nguyên ≥ 0, cách nhau bằng dấu phẩy.' : `→ TR-${v || '?'}-…`; el.classList.toggle('bad', Boolean(fr)); return; }
+  el.textContent = `→ TR-${v || '?'}-${fs.join(',')}${fs.some((f, i) => i && f <= fs[i - 1]) ? '   ⚠ frame chưa tăng dần' : ''}`;
+  el.classList.toggle('bad', !v);
+}
+async function tmResolve() {
+  const raw = $('#tmVideo').value.trim(), fs = parseFrames($('#tmFrames').value);
+  if (!raw) { toast('Nhập Video ID.', 'error'); $('#tmVideo').focus(); return null; }
+  if (!fs) { toast('Nhập các frame: số nguyên ≥ 0, cách nhau bằng dấu phẩy.', 'error'); $('#tmFrames').focus(); return null; }
+  const res = await resolveVideo(raw);
+  if (!res.found) { toast(notFoundMsg(raw, res), 'error', 5000); $('#tmVideo').focus(); return null; }
+  $('#tmVideo').value = res.id; tmPreview();
+  return { v: res.id, fs };
+}
+async function tmSubmit() {
+  if (!dresLoggedIn()) { toast('Chưa đăng nhập DRES / chưa chọn evaluation.', 'error'); openDres(); return; }
+  const r = await tmResolve();
+  if (!r) return;
+  const text = `TR-${r.v}-${r.fs.join(',')}`;
+  await sendDres({ answerSets: [{ answers: [{ text }] }] }, 'trake', text);
+}
+async function tmAdd() {
+  const r = await tmResolve();
+  if (!r) return;
+  await fpsReady();
+  for (const f of r.fs) {
+    const it = itemOf(r.v, f, f / fps25(r.v));
+    const kf = await nearestKeyframe(r.v, f);
+    if (kf !== f) { it.thumbFrame = kf; it.src = frameUrl(r.v, kf); }
+    addToCart(it, true, true);
+  }
+  toast(`Đã thêm ${r.fs.length} frame của ${r.v} vào danh sách nộp.`, 'success');
 }
 function bindCart() {
   const list = $('#cartList');
@@ -1142,9 +1280,49 @@ function bindCart() {
     e.preventDefault(); const it = S.cart[+row.dataset.i]; openStrip(it.video_id, it.thumbFrame ?? it.frame_id);
   });
   list.addEventListener('input', e => { if (e.target.classList.contains('qa')) S.answers[e.target.dataset.k] = e.target.value; });
+  // Kéo thả để đổi thứ tự; frame kéo từ lưới vào thì chèn đúng chỗ thả.
+  const CART_DRAG = 'text/x-cart-index';
+  let dragFrom = -1;
+  const rows = () => $$('#cartList .citem');
+  const unmark = () => rows().forEach(r => r.classList.remove('drop-before', 'drop-after'));
+  const dropAt = e => {
+    const row = e.target.closest('.citem');
+    if (!row) return { row: null, index: S.cart.length };
+    const b = row.getBoundingClientRect();
+    const after = document.body.classList.contains('cart-wide') ? e.clientX > b.left + b.width / 2 : e.clientY > b.top + b.height / 2;
+    return { row, after, index: +row.dataset.i + (after ? 1 : 0) };
+  };
+  list.addEventListener('dragstart', e => {
+    const row = e.target.closest('.citem');
+    if (!row) return;
+    if (e.target.closest('input')) { e.preventDefault(); return; } // đang bôi đen chữ trong ô trả lời Q&A
+    dragFrom = +row.dataset.i;
+    e.dataTransfer.setData(CART_DRAG, String(dragFrom));
+    e.dataTransfer.effectAllowed = 'move';
+    hoverStop();
+    requestAnimationFrame(() => row.classList.add('dragging'));
+  });
+  list.addEventListener('dragover', e => {
+    const types = [...e.dataTransfer.types];
+    if (!types.includes(CART_DRAG) && !types.includes('application/json')) return;
+    e.preventDefault();
+    const p = dropAt(e);
+    unmark();
+    if (p.row) p.row.classList.add(p.after ? 'drop-after' : 'drop-before');
+  });
+  list.addEventListener('drop', e => {
+    const types = [...e.dataTransfer.types], p = dropAt(e);
+    unmark(); cart.classList.remove('drag-over'); $('#btnCart').classList.remove('drop');
+    if (types.includes(CART_DRAG)) { e.preventDefault(); e.stopPropagation(); moveTo(dragFrom, p.index); return; }
+    if (types.includes('application/json')) {
+      e.preventDefault(); e.stopPropagation();
+      try { const it = JSON.parse(e.dataTransfer.getData('application/json')); if (it && it.key) addToCart(it, true, false, p.index); } catch { /* không phải frame */ }
+    }
+  });
+  list.addEventListener('dragend', () => { dragFrom = -1; unmark(); rows().forEach(r => r.classList.remove('dragging')); });
   const cart = $('#cart');
   for (const el of [cart, $('#btnCart')]) {
-    el.addEventListener('dragover', e => { e.preventDefault(); cart.classList.add('drag-over'); $('#btnCart').classList.add('drop'); });
+    el.addEventListener('dragover', e => { e.preventDefault(); if (e.dataTransfer.types.includes(CART_DRAG)) return; cart.classList.add('drag-over'); $('#btnCart').classList.add('drop'); });
     el.addEventListener('dragleave', () => { cart.classList.remove('drag-over'); $('#btnCart').classList.remove('drop'); });
     el.addEventListener('drop', e => {
       e.preventDefault(); cart.classList.remove('drag-over'); $('#btnCart').classList.remove('drop');
@@ -1385,7 +1563,7 @@ function formatTrakeAnswer(items) {
   if (fs.some(f => !Number.isSafeInteger(f) || f < 0)) { toast('Frame TRAKE không hợp lệ.', 'error'); return null; }
   return `TR-${v}-${fs.join(',')}`;
 }
-// fromCart=true: bài được chấm ĐÚNG/SAI sẽ được gỡ khỏi danh sách nộp.
+// Nộp xong (DRES nhận bài, hoặc báo đội đã nộp đáp án này) thì mục đó được gỡ khỏi danh sách nộp của cả team.
 async function submitDres(item = null, fromCart = true) {
   if (!dresLoggedIn()) { toast('Chưa đăng nhập DRES / chưa chọn evaluation.', 'error'); openDres(); return; }
   await fpsReady();
@@ -1407,16 +1585,42 @@ async function submitDres(item = null, fromCart = true) {
       if (!a) { toast(`Nhập câu trả lời cho ${it.label} trước khi nộp.`, 'error'); openCart(true); return; }
       answer = { text: `QA-${a}-${it.video_id}-${ms}` }; label = answer.text;
     }
-    if (fromCart) removeKey = it.key;
+    removeKey = it.key; // nộp xong (kể cả nộp từ cửa sổ video) thì gỡ frame này khỏi danh sách chung — không ai nộp lại được nữa
   }
   await sendDres({ answerSets: [{ answers: [answer] }] }, removeKey, label);
+}
+// Đáp án đã nộp: {evaluationId: {đáp án: {t, by}}} — chia sẻ cho cả team qua /ws/dres để không ai nộp trùng (DRES chặn trùng theo đội).
+const sentInfo = v => (v && typeof v === 'object' ? v : { t: Number(v) || 0, by: '' }); // bản cũ chỉ lưu thời điểm
+function markSent(key) {
+  (D.sent[D.evalId] ||= {})[key] = { t: Date.now(), by: S.teamName || '' };
+  store.set('aicDresSent', JSON.stringify(D.sent));
+  dresSocketSend();
+}
+function mergeSent(shared) {
+  if (!shared || typeof shared !== 'object') return;
+  let changed = false;
+  for (const [ev, map] of Object.entries(shared)) {
+    if (!map || typeof map !== 'object') continue;
+    const mine = (D.sent[ev] ||= {});
+    for (const [k, v] of Object.entries(map)) if (!mine[k]) { mine[k] = sentInfo(v); changed = true; }
+  }
+  if (changed) store.set('aicDresSent', JSON.stringify(D.sent));
+}
+function sharedSent() { // chỉ gửi evaluation đang nộp, tối đa 500 đáp án gần nhất
+  const map = D.sent[D.evalId] || {};
+  return { [D.evalId]: Object.fromEntries(Object.entries(map).sort((a, b) => sentInfo(b[1]).t - sentInfo(a[1]).t).slice(0, 500)) };
+}
+function afterSubmit(removeKey, label) {
+  if (removeKey === 'trake') { snapshotTrake(label); clearCart(); } // TRAKE: dọn cả danh sách (của cả team), có nút ↩ Quay lại
+  else if (removeKey) removeFromCart(removeKey);
 }
 async function sendDres(body, removeKey, label) {
   if (D.busy) { toast('Bài đang được gửi, chờ chút…'); return; }
   const key = JSON.stringify(body.answerSets), prev = D.sent[D.evalId]?.[key];
   if (prev && !(D.confirmKey === key && Date.now() < D.confirmUntil)) {
+    const p = sentInfo(prev), who = p.by && p.by !== S.teamName ? ` bởi ${p.by}` : '';
     D.confirmKey = key; D.confirmUntil = Date.now() + 6000;
-    toast(`⚠️ Đáp án này đã nộp lúc ${new Date(prev).toLocaleTimeString()} — BTC không cho nộp trùng. Bấm nộp lần nữa trong 6 giây nếu vẫn muốn gửi.`, 'error', 6000);
+    toast(`⚠️ Đáp án này đội đã nộp lúc ${new Date(p.t).toLocaleTimeString()}${who} — DRES sẽ từ chối nếu là cùng câu truy vấn. Chỉ bấm nộp lần nữa (trong 6 giây) nếu đây là câu truy vấn khác.`, 'error', 6000);
     return;
   }
   D.busy = true; D.confirmKey = null;
@@ -1425,17 +1629,22 @@ async function sendDres(body, removeKey, label) {
   try {
     const data = await dresCall(`/api/v2/submit/${enc(D.evalId)}?session=${enc(D.session)}`, 'POST', body);
     const verdict = data?.submission || data?.description || 'đã gửi';
-    (D.sent[D.evalId] ||= {})[key] = Date.now();
-    store.set('aicDresSent', JSON.stringify(D.sent));
+    markSent(key);
     D.log = [{ t: Date.now(), task, label, verdict }, ...D.log].slice(0, 12);
     store.set('aicDresLog', JSON.stringify(D.log));
+    afterSubmit(removeKey, label); // đúng, sai hay đang chờ chấm đều đã nộp xong
     if (verdict === 'CORRECT' || verdict === 'WRONG') {
-      if (removeKey === 'trake') clearCart();          // gỡ khỏi danh sách của cả team để không ai nộp trùng
-      else if (removeKey) removeFromCart(removeKey);
       toast(verdict === 'CORRECT' ? `✅ Chính xác! ${label}` : `❌ Chưa chính xác. ${label}`, verdict === 'CORRECT' ? 'success big' : 'error big', 4500);
     } else toast(`Đã nộp ${label} — ${verdict}`, 'info', 4500);
   } catch (e) {
-    toast(`Lỗi khi nộp: ${e.message}`, 'error', 6000);
+    if (/duplicate/i.test(e.message)) {
+      // DRES chặn trùng theo đội: đáp án này bạn hoặc đồng đội đã nộp trước đó → coi như đã nộp, gỡ khỏi danh sách.
+      markSent(key);
+      D.log = [{ t: Date.now(), task, label, verdict: 'TRÙNG — DRES không chấm lại' }, ...D.log].slice(0, 12);
+      store.set('aicDresLog', JSON.stringify(D.log));
+      afterSubmit(removeKey, label);
+      toast(`⚠️ DRES từ chối vì đội đã nộp đúng đáp án này trước đó (bạn hoặc đồng đội) — lần này không được chấm, không cần nộp lại. ${label}`, 'error', 7000);
+    } else toast(`Lỗi khi nộp: ${e.message}`, 'error', 6000);
   } finally {
     D.busy = false; btns.forEach(b => { b.disabled = false; });
   }
@@ -1507,13 +1716,14 @@ function onQueueMsg(msg) {
   } else return;
   renderCart();
 }
-function dresSocketSend() { if (!T.applying && D.session && D.evalId) T.dres?.send({ action: 'UPDATE_DRES', payload: { sessionId: D.session, evaluationId: D.evalId, evaluationName: D.evalName, baseUrl: D.base } }); }
+function dresSocketSend() { if (!T.applying && D.session && D.evalId) T.dres?.send({ action: 'UPDATE_DRES', payload: { sessionId: D.session, evaluationId: D.evalId, evaluationName: D.evalName, baseUrl: D.base, sent: sharedSent() } }); }
 
 function initTeam() {
   T.team = socket('/ws/team', msg => { if (msg.type === 'roster') { T.roster = msg.members || []; renderTeamBadge(); } }, heartbeat);
   setInterval(heartbeat, 4000);
   const cid = clientId();
   T.dres = socket(`/ws/dres/${cid}`, msg => {
+    if (msg.action === 'SYNC_DRES') mergeSent(msg.payload?.sent); // đáp án đồng đội đã nộp
     if (msg.action === 'SYNC_DRES' && msg.payload?.sessionId) {
       T.applying = true;
       D.session = msg.payload.sessionId; D.evalId = msg.payload.evaluationId; D.evalName = msg.payload.evaluationName || '';
@@ -1851,9 +2061,11 @@ const HELP = [
   ['← →', 'Keyframe trước / sau'], ['↑ / ↓', 'Hiện / ẩn khung xem lớn'], ['=  hoặc Enter', 'Thêm frame đang chọn'],
   ['Chuột phải', 'Phát video tại frame'], ['Esc', 'Đóng dải keyframe'],
   ['Cửa sổ video'],
-  ['Space', 'Phát / dừng'], ['← → (Shift)', '±1 frame (±1 giây)'], ['C', 'Add to Answer (frame hiện tại)'],
-  ['S', 'Nộp bài frame hiện tại'], ['1–4', 'Tốc độ 0.5x · 1x · 1.5x · 2x'], ['Kéo thanh tiêu đề', 'Di chuyển cửa sổ (đúp chuột: về giữa)'],
+  ['Space', 'Phát / dừng'], ['← →', 'Lùi / tới 5 giây (từng frame: nút ◀ 1f / 1f ▶)'], ['Giữ Shift · Shift+Z', 'Chạy x1.5 · x2, nhả ra về tốc độ cũ (cả video khi rê chuột lên ảnh)'], ['C', 'Add to Answer (frame hiện tại)'],
+  ['S', 'Nộp bài frame hiện tại'], ['1–4', 'Tốc độ 0.5x · 1x · 1.5x · 2x'], ['Kéo thanh tiêu đề', 'Di chuyển cửa sổ (đúp chuột: về giữa)'], ['G', 'Gõ số frame để nhảy tới (Enter)'],
   ['Xuất & nộp bài'],
+  ['Kéo thả', 'Đổi thứ tự trong danh sách nộp (thả ảnh từ lưới vào đúng chỗ muốn chèn)'],
+  ['TRAKE', 'Nộp chuỗi xong (đúng hay sai) → danh sách được dọn; ↩ Quay lại lần nộp trước để lấy lại · ✍ Nộp tay: gõ Video ID + frame'],
   ['Alt+A', 'Mở/đóng danh sách nộp'], ['Alt+S', 'Xóa hết danh sách nộp'], ['Ctrl+S', 'Nộp bài mục #1 (TRAKE: cả chuỗi)'],
   ['Định dạng nộp'],
   ['KIS / VKIS', '{mediaItemName: <video>, start: <ms>, end: <ms>} — start = end'],
@@ -1926,17 +2138,7 @@ function onKey(e) {
     else return;
     e.preventDefault(); return;
   }
-  if (isOpen('#videoModal')) {
-    const el = $('#vmVideo');
-    if (k === ' ') el.paused ? el.play() : el.pause();
-    else if (k === 'ArrowLeft') e.shiftKey ? stepVideo(-1) : stepFrames(-1);
-    else if (k === 'ArrowRight') e.shiftKey ? stepVideo(1) : stepFrames(1);
-    else if (lk === 'c') vmAddToCart();
-    else if (lk === 's' && S.task !== 'trake') vmSubmit();
-    else if ('1234'.includes(k)) { const r = [0.5, 1, 1.5, 2][+k - 1]; el.playbackRate = r; $('#vmSpeed').value = String(r); }
-    else return;
-    e.preventDefault(); return;
-  }
+  if (isOpen('#videoModal')) return; // phím của cửa sổ video: xem onVideoKey
   if ($$('.overlay.open').length) return;
   if (!$('#strip').hidden && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', '=', 'Enter'].includes(k)) {
     e.preventDefault();
@@ -2037,7 +2239,7 @@ function init() {
   $$('#videoModal [data-step]').forEach(b => b.addEventListener('click', () => stepVideo(+b.dataset.step)));
   $$('#videoModal [data-stepf]').forEach(b => b.addEventListener('click', () => stepFrames(+b.dataset.stepf)));
   $('#vmRestart').onclick = () => { vid.currentTime = VM.t0; };
-  $('#vmSpeed').addEventListener('change', e => { vid.playbackRate = Number(e.target.value); });
+  $('#vmSpeed').addEventListener('change', e => { if (!shiftFast) setRate(vid, Number(e.target.value)); e.target.blur(); }); // blur: ← → không đổi tốc độ nữa
   $('#vmAdd').onclick = vmAddToCart;
   $('#vmSubmit').onclick = vmSubmit;
   $('#vmStrip').onclick = async () => { await fpsReady(); openStrip(VM.v, vmFrame() ?? Math.round(vid.currentTime * 25)); closeOverlay('#videoModal'); };
@@ -2063,6 +2265,13 @@ function init() {
   $('#cartClear').onclick = () => { if (S.cart.length) { clearCart(); toast('Đã xóa hết danh sách nộp.'); } };
   $('#cartCsv').onclick = openCsv;
   $('#cartSubmit').onclick = () => submitDres();
+  $('#cartUndo').onclick = restoreTrake;
+  $('#tmSubmit').onclick = tmSubmit;
+  $('#tmAdd').onclick = tmAdd;
+  ['#tmVideo', '#tmFrames'].forEach(sel => $(sel).addEventListener('input', tmPreview));
+  $('#tmFrames').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); tmSubmit(); } });
+  $('#vmGoto').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); vmGotoFrame(); } });
+  tmPreview();
   $('#btnSubmit').onclick = () => submitDres();
   const share = $('#cartShare');
   const renderShare = () => { share.classList.toggle('on', S.cartShare); share.title = `Chia sẻ danh sách với team: ${S.cartShare ? 'BẬT' : 'TẮT'}`; };
@@ -2092,6 +2301,10 @@ function init() {
   });
   $('#btnHelp').onclick = openHelp;
   document.addEventListener('keydown', onKey);
+  window.addEventListener('keydown', onVideoKey, true);
+  window.addEventListener('keydown', onShift, true);
+  window.addEventListener('keyup', onShift, true);
+  window.addEventListener('blur', () => { if (shiftFast || zFast) { shiftFast = zFast = false; applyShiftSpeed(); } }); // nhả Shift lúc đang ở cửa sổ khác
 
   bindHistory();
   renderHistory();

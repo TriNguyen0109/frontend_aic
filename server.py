@@ -74,7 +74,7 @@ FIXED_DIRS = [(DATA_ROOT, "mặc định"), *((Path(p), "--data") for p in ARGS.
 VIDEOS, FRAMES = {}, {}          # "N051-V001" -> file video / [thư mục keyframe]
 VIDEO_KEYS, FRAME_KEYS = {}, {}  # ("N", 51, 1) -> "N051-V001": khớp ID dù "_" hay "-", thiếu số 0
 VIDEO_KEY_RE = re.compile(r"([A-Z]+)0*(\d+)[\s_-]*V0*(\d+)")
-SCAN = {"at": 0.0, "lock": threading.Lock(), "per": {}}
+SCAN = {"at": 0.0, "lock": threading.Lock(), "per": {}, "sig": None}
 
 
 def clean_dir(p):
@@ -98,6 +98,19 @@ def write_dirs_file(dirs):
     DIRS_FILE.write_text("# Thư mục chứa video / keyframe trên máy — mỗi dòng 1 thư mục (quét sâu 5 cấp).\n"
                          "# Sửa trên trang (⚙️ Cài đặt → Thư mục video trên máy) hoặc sửa file này rồi đợi ≤ 30 giây.\n"
                          + "".join(d + "\n" for d in dirs), encoding="utf-8")
+
+
+def dirs_file_sig():
+    try:
+        st = DIRS_FILE.stat()
+        return st.st_mtime_ns, st.st_size
+    except OSError:
+        return None
+
+
+def dirs_file_changed():
+    """video_dirs.txt vừa được sửa (tay hoặc qua trang) mà chưa quét lại."""
+    return dirs_file_sig() != SCAN["sig"]
 
 
 def data_dirs():
@@ -144,6 +157,7 @@ def scan(max_depth=5):
                     vids.setdefault(stem.upper(), Path(e.path))
                     stat["videos"] += 1
 
+    sig = dirs_file_sig()
     for base, source in data_dirs():
         stat = {"path": str(base), "source": source, "exists": base.is_dir(), "videos": 0, "frame_dirs": 0}
         if stat["exists"]:
@@ -151,14 +165,28 @@ def scan(max_depth=5):
         per[str(base)] = stat
     # thay cả bảng 1 lần — request đang chạy không thấy bảng rỗng giữa chừng
     VIDEOS, FRAMES, VIDEO_KEYS, FRAME_KEYS = vids, frames, key_map(vids), key_map(frames)
-    SCAN["per"] = per
+    SCAN["per"], SCAN["sig"] = per, sig
     SCAN["at"] = time.time()
 
 
-def rescan_if_stale(wait=False):
-    """File mới chép vào / thư mục mới thêm được thấy mà không cần khởi động lại (quét lại tối đa 30s/lần).
-    wait=False: quét nền để request đang chờ (vd ảnh keyframe) không bị treo."""
-    if time.time() - SCAN["at"] <= 30 or not SCAN["lock"].acquire(blocking=False):
+def rescan_if_stale(wait=False, max_age=30):
+    """File mới chép vào / thư mục mới thêm được thấy mà không cần khởi động lại.
+    Quét lại khi lần quét trước cũ hơn max_age giây, hoặc video_dirs.txt vừa bị sửa.
+    wait=False: quét nền để request đang chờ (vd ảnh keyframe) không bị treo.
+    wait=True: quét xong mới trả lời (người dùng đang mở video) — có lượt quét khác đang chạy thì chờ nó."""
+    def needed():
+        return time.time() - SCAN["at"] > max_age or dirs_file_changed()
+    if not needed():
+        return
+    if wait:
+        if SCAN["lock"].acquire(timeout=60):
+            try:
+                if needed():  # lượt quét vừa chạy xong có thể đã cập nhật rồi
+                    scan()
+            finally:
+                SCAN["lock"].release()
+        return
+    if not SCAN["lock"].acquire(blocking=False):
         return
     SCAN["at"] = time.time()
 
@@ -194,14 +222,18 @@ def _lookup(table, keys, vid):
 
 
 def local_video(vid):
+    if dirs_file_changed():  # vừa thêm / bỏ thư mục trong video_dirs.txt → quét lại trước khi tìm
+        rescan_if_stale(wait=True)
     p = _lookup(VIDEOS, VIDEO_KEYS, vid)
     if p and p.is_file():
         return p
-    rescan_if_stale()
+    rescan_if_stale()  # quét nền: video mới chép vào sẽ thấy ở lần mở sau
     return None
 
 
 def local_frame(vid, frame):
+    if dirs_file_changed():
+        rescan_if_stale(wait=True)
     dirs = _lookup(FRAMES, FRAME_KEYS, vid)
     if not dirs:
         rescan_if_stale()
@@ -232,10 +264,12 @@ def find_video(q):
     res = {"found": False, "query": q, "id": None, "source": None, "suggest": [], "backend_error": None}
     if not s or len(s) > 64 or not re.fullmatch(r"[A-Z0-9_ -]+", s):
         return res
+    if dirs_file_changed():
+        rescan_if_stale(wait=True)
     key = video_key(s)
     sid = s if s in VIDEOS else VIDEO_KEYS.get(key) if key else None
-    if not sid:
-        rescan_if_stale(wait=True)
+    if not sid:  # người dùng đang gõ ID để mở: quét lại (nếu lần trước cũ hơn 5 giây) trước khi báo không tìm thấy
+        rescan_if_stale(wait=True, max_age=5)
         sid = s if s in VIDEOS else VIDEO_KEYS.get(key) if key else None
     if sid:
         return {**res, "found": True, "id": VIDEOS[sid].stem, "source": "local"}

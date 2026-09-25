@@ -100,6 +100,10 @@ scp <user>@<server>:/workingspace_aiclub/WorkingSpace/Personal/bachdx/AIC2026_Ba
   tab **🎯 Frame Calc** — thời điểm (giây), số frame, fps, ô đáp án Q&A, **⊕ Add to Answer**, **✅ Nộp bài frame này**;
   tab **📝 ASR / OCR** — lời thoại / chữ trong video, bấm để tua tới.
 - **📤 Xuất:** tab KIS / Q&A / TRAKE, đồng bộ cả đội; nút **CSV** tải file CSV hoặc lưu SOLOAI.
+  **Kéo thả** từng dòng để đổi thứ tự (mục #1 / E1 lên đầu); kéo ảnh từ lưới thả vào đúng chỗ muốn chèn.
+- **✍ Nộp tay TRAKE** (tab TRAKE, cuối danh sách nộp): gõ Video ID + các frame (`100, 250, 400`), xem trước `TR-…` rồi **✅ Nộp tay**,
+  hoặc **＋ Vào danh sách** để thêm các frame đó vào danh sách nộp.
+- **Cửa sổ video → Frame Calc → Đến frame** (phím **G**): gõ số frame, Enter → nhảy tới đúng frame đó và dừng.
 
 ## Nộp DRES (đúng hướng dẫn BTC)
 
@@ -116,8 +120,13 @@ Nộp: `POST /api/v2/submit/{evaluationID}?session=<sessionId>` với body:
 | TRAKE | `{"text": "TR-<VIDEO_ID>-<FRAME_ID1>,<FRAME_ID2>,..."}` |
 
 - `<ms>` = thời điểm của frame trong video gốc = `frame_id × 1000 / fps` (fps lấy từ `/api/video-fps` của backend).
-- Chặn nộp trùng: cùng một đáp án trong cùng evaluation sẽ bị cảnh báo; muốn vẫn gửi thì bấm nộp lần nữa trong 6 giây.
-- Bài được chấm ĐÚNG/SAI tự gỡ khỏi danh sách nộp (của cả team). Cửa sổ DRES có nhật ký các lần nộp gần nhất.
+- Chặn nộp trùng **theo cả đội** (DRES cũng chặn trùng theo đội): danh sách đáp án đã nộp được chia sẻ cho mọi máy qua backend,
+  nên đáp án đồng đội đã nộp cũng bị cảnh báo trước khi gửi (“… bởi An”). Chỉ bấm nộp lần nữa trong 6 giây nếu đó là câu truy vấn khác.
+- DRES báo *“rejected by filter: Duplicate submission”* → trang hiểu là đội đã nộp đáp án này, gỡ nó khỏi danh sách nộp; bài đó không được chấm lại, không cần nộp tiếp.
+- KIS / Q&A: mục đã nộp xong (đúng, sai hay đang chờ chấm) tự gỡ khỏi danh sách nộp của cả team — kể cả khi nộp từ cửa sổ video.
+- TRAKE: nộp xong (đúng, sai hay trạng thái khác) thì **dọn sạch danh sách nộp**; nút **↩ Quay lại lần nộp trước** ở dưới cùng lấy lại
+  các ứng viên như lúc bấm nộp (mục thêm sau đó vẫn giữ, xếp sau). Nộp trùng / lỗi mạng thì không dọn.
+- Cửa sổ DRES có nhật ký các lần nộp gần nhất.
 - Chỗ nộp: nút **✅ Nộp bài** (mục #1 trong danh sách, TRAKE = cả chuỗi), nút 🚀 trên từng mục trong 📤 Xuất,
   **✅ Nộp bài frame này** / phím **S** trong cửa sổ video, **Ctrl+S**.
 
@@ -130,7 +139,7 @@ Nộp: `POST /api/v2/submit/{evaluationID}?session=<sessionId>` với body:
 | Alt+E · Alt+W · Alt+X | Dịch VI→EN · lưới ↔ theo video · bật/tắt preview |
 | Ctrl+Q · Ctrl+E | Reset truy vấn & chế độ · xóa nội dung các ô truy vấn |
 | Alt+A · Alt+S · Ctrl+S | Mở/đóng 📤 Xuất · xóa danh sách nộp · nộp mục #1 |
-| (video) Space · ←/→ · C · S · 1–4 | Phát/dừng · ±1 frame (Shift: ±1 giây) · Add to Answer · nộp · tốc độ |
+| (video) Space · ←/→ · giữ Shift / Shift+Z · G · C · S · 1–4 | Phát/dừng · lùi/tới 5 giây (từng frame: nút ◀ 1f / 1f ▶) · chạy x1.5 / x2 khi giữ (cả video khi rê chuột lên ảnh) · gõ số frame để nhảy tới · Add to Answer · nộp · tốc độ |
 
 - **Rê chuột** lên ảnh → phát video quanh frame (tắt bằng ▶ Hover) · **Click** → mở video · **Space** → xem ảnh toàn màn hình.
 - Ô **✨** trên lưới: tìm chữ OCR / lời thoại ASR trong K kết quả (không phân biệt dấu, nhiều từ cách bằng dấu phẩy).

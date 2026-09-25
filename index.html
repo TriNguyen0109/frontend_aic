@@ -205,6 +205,13 @@
     </div>
     <div class="cart-list" id="cartList"></div>
     <div class="cart-foot">
+      <div class="tm" id="trakeManual" hidden>
+        <div class="tm-title">✍ Nộp tay TRAKE</div>
+        <div class="row"><input id="tmVideo" placeholder="Video ID" spellcheck="false" autocomplete="off"><input id="tmFrames" placeholder="frame1, frame2, …" spellcheck="false" autocomplete="off"></div>
+        <div class="tm-preview muted" id="tmPreview"></div>
+        <div class="row"><button class="btn xs grow" id="tmAdd" title="Thêm các frame này vào danh sách nộp (để xem ảnh / kéo đổi thứ tự)">＋ Vào danh sách</button><button class="btn xs primary grow" id="tmSubmit" title="Nộp thẳng chuỗi TR-… lên DRES">✅ Nộp tay</button></div>
+      </div>
+      <button class="btn sm undo" id="cartUndo" hidden></button>
       <button class="btn sm primary grow" id="cartSubmit">✅ Nộp bài</button>
     </div>
   </aside>
@@ -223,12 +230,12 @@
       <div class="vm-left">
         <div class="player"><video id="vmVideo" controls preload="auto"></video></div>
         <div class="scrub">
-          <button class="btn xs" data-step="-10" title="Lùi 10 giây">⏪</button>
+          <button class="btn xs" data-step="-10" title="Lùi 10 giây (← : lùi 5 giây)">⏪</button>
           <button class="btn xs" id="vmRestart" title="Về thời điểm ban đầu">⟲</button>
-          <button class="btn xs" data-step="10" title="Tới 10 giây">⏩</button>
-          <button class="btn xs" data-stepf="-1" title="Lùi 1 frame (←)">◀ 1f</button>
-          <button class="btn xs" data-stepf="1" title="Tới 1 frame (→)">1f ▶</button>
-          <select id="vmSpeed" title="Tốc độ phát (phím 1–4)">
+          <button class="btn xs" data-step="10" title="Tới 10 giây (→ : tới 5 giây)">⏩</button>
+          <button class="btn xs" data-stepf="-1" title="Lùi 1 frame">◀ 1f</button>
+          <button class="btn xs" data-stepf="1" title="Tới 1 frame">1f ▶</button>
+          <select id="vmSpeed" title="Tốc độ phát (phím 1–4 · giữ Shift: x1.5 · giữ Shift+Z: x2)">
             <option value="0.5">0.5x</option><option value="1" selected>1x</option>
             <option value="1.5">1.5x</option><option value="2">2x</option>
           </select>
@@ -244,6 +251,7 @@
           <div class="calc-row"><span>Video ID</span><b id="vcId">—</b></div>
           <div class="calc-row"><span>Time</span><b><span id="vmTime">0.00</span>s</b></div>
           <div class="calc-row"><span>Frame Index</span><b class="tc-frame" id="vmFrame">—</b></div>
+          <div class="calc-row goto"><span>Đến frame <kbd>G</kbd></span><input id="vmGoto" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="gõ số frame ↵" title="Gõ số frame rồi Enter để nhảy tới (video dừng tại đó)"></div>
           <div class="calc-row"><span>FPS</span><span class="muted" id="vmFps"></span></div>
           <input id="vmAnswer" placeholder="Câu trả lời Q&amp;A — nộp dạng QA-&lt;đáp án&gt;-&lt;video&gt;-&lt;ms&gt;" hidden>
           <button class="btn primary big" id="vmAdd">⊕ Add to Answer <kbd>C</kbd></button>
