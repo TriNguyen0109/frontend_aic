@@ -1,0 +1,25 @@
+# ── Dữ liệu cục bộ: video, keyframe, OCR/ASR/FPS (hàng trăm GB) — không đưa lên GitHub ──
+# server.py tự tạo lại data/batch1, data/batch2, data/meta khi chạy.
+data/
+
+# Video ở bất kỳ đâu trong thư mục (cả .MP4 viết hoa)
+*.[mM][pP]4
+*.[wW][eE][bB][mM]
+*.[mM][kK][vV]
+*.[mM][oO][vV]
+*.[aA][vV][iI]
+*.[mM]4[vV]
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Log
+*.log
+
+# Hệ điều hành / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

@@ -33,6 +33,18 @@ data/batch2/...
 - Video / ảnh có trên máy được phát thẳng từ ổ cứng (tua nhanh, hover mượt). Không có thì `server.py` tự lấy từ backend.
 - Chép thêm file trong lúc đang chạy cũng được (tự quét lại, tối đa 30 giây).
 - Trong cửa sổ video, nhãn **📁 từ máy / ☁ từ server** cho biết video đang lấy ở đâu.
+- Tên file khác backend một chút vẫn khớp: backend gọi `N051_V001` mà file là `N051-V001.mov` (hoặc ngược lại) vẫn phát từ máy.
+
+### Video ở ổ đĩa khác (E:, ổ rời…)
+
+**⚙️ Cài đặt → 📁 Thư mục video trên máy** → dán đường dẫn (vd `E:\AIC\batch2`, dán kèm ngoặc kép từ *Copy as path* cũng được) → **＋ Thêm**.
+Có hiệu lực ngay, không cần khởi động lại; mỗi thư mục hiện số video tìm thấy, bấm **✕** để bỏ.
+
+- Chọn thư mục chứa video, không nên chọn cả gốc ổ (`E:\`) vì quét lâu. Quét sâu 5 cấp thư mục con.
+- Danh sách lưu ở `data/video_dirs.txt` (mỗi dòng 1 thư mục) — sửa tay file này cũng được, tự đọc lại trong ≤ 30 giây.
+- Ổ rời chưa cắm: thư mục vẫn được giữ trong danh sách (hiện *không tìm thấy*), cắm vào là dùng lại được.
+- Chỉ thêm / bỏ được từ chính máy chạy `server.py` (máy khác trong mạng LAN chỉ xem).
+- Vẫn dùng được cách cũ: `python server.py --data E:\AIC_data`.
 
 ## OCR / ASR / keyframe / FPS trên máy (tuỳ chọn)
 
@@ -77,6 +89,9 @@ scp <user>@<server>:/workingspace_aiclub/WorkingSpace/Personal/bachdx/AIC2026_Ba
 
 - **Thanh bên trái:** tab **KIS · Q&A · TRAKE · ▶ VIDEO** → ô truy vấn → nút **Search** / **DeepSeek** / lọc video đã chọn → **Queries History** (tab *Team* xem truy vấn của đồng đội).
   Tab **▶ VIDEO**: nhập Video ID (+ thời điểm) để mở thẳng video.
+- **Mở video bằng ID** (tab ▶ VIDEO, ô mở nhanh trên thanh trên, nút *Mở* của anchor TRAKE): nhận cả batch 1 và batch 2 —
+  `L21_V001`, `N051-V001`, `M01_V002`, `S01-V001`; gõ `_` hay `-`, thiếu số 0 (`n51_v1`), có đuôi `.mov/.mp4` đều được.
+  Tìm ở máy trước (video có trên máy mở được cả khi **mất kết nối backend**), rồi trên server. Gõ sai → báo **Không tìm thấy** (kèm gợi ý nếu gần giống), không chuyển sang tìm kiếm.
 - **Thanh trên:** ● API · đội · ô mở nhanh video · công tắc **Theo video** · **🔑 DRES** · **📤 Xuất** (danh sách nộp) · **✅ Nộp bài**.
 - **Mỗi ô kết quả:** **Chọn video** (góc trái) · hạng (góc phải) · khi rê chuột hiện **TRAKE** · **☰** (dải keyframe) · **+** (thêm vào danh sách nộp).
 - **Khung preview** (giữ **Alt** + rê chuột, hoặc **Alt+X** để bật luôn): trái = ảnh đang trỏ, phải = frame đang chọn trong dải keyframe.
@@ -120,4 +135,3 @@ Nộp: `POST /api/v2/submit/{evaluationID}?session=<sessionId>` với body:
 - **Rê chuột** lên ảnh → phát video quanh frame (tắt bằng ▶ Hover) · **Click** → mở video · **Space** → xem ảnh toàn màn hình.
 - Ô **✨** trên lưới: tìm chữ OCR / lời thoại ASR trong K kết quả (không phân biệt dấu, nhiều từ cách bằng dấu phẩy).
 - Bấm **⚡ AIC 2026** (góc trên trái) để xem toàn bộ phím tắt.
-# frontend_aic
