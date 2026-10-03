@@ -87,6 +87,9 @@ function errText(body, status) {
   if (!d) return `HTTP ${status}`;
   return typeof d === 'string' ? d : JSON.stringify(d);
 }
+// Yêu cầu phụ (health, OCR, ASR, keyframe…) có hạn chờ: backend treo thì bỏ, không giữ kết nối của trình duyệt
+// (Chrome chỉ mở 6 kết nối tới cùng một địa chỉ — bị chiếm hết thì video ở máy cũng phải xếp hàng chờ).
+const waitMs = ms => (typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(ms) : undefined);
 async function api(path, opts = {}) {
   const res = await fetch(CFG.backend + path, opts);
   const body = await res.json().catch(() => ({}));
@@ -132,28 +135,92 @@ document.addEventListener('load', e => {
   const img = e.target;
   if (img instanceof HTMLImageElement && img.dataset.v && !img.dataset.fb && MEDIA.frames === null && img.src.includes('/media/frames/')) MEDIA.frames = true;
 }, true);
-const imgTag = (v, f, cls = '') => `<img class="${cls}" data-v="${esc(v)}" data-f="${f}" src="${esc(frameUrl(v, f))}" loading="lazy" draggable="false" alt="">`;
+// Ảnh keyframe không gắn src ngay: hàng đợi IMGQ tải dần ảnh đang hiện trên màn hình.
+const imgTag = (v, f, cls = '') => `<img class="${cls}" data-v="${esc(v)}" data-f="${f}" data-src="${esc(frameUrl(v, f))}" draggable="false" alt="">`;
 
-// Gán src cho <video> với fallback media → API.
+/* Hàng đợi tải ảnh — Chrome chỉ mở 6 kết nối cùng lúc tới 1 địa chỉ (localhost:8082). Sau khi search có ~100 ảnh
+ * keyframe, máy không có nên server.py lấy từng ảnh từ server qua SSH (2–4 giây/ảnh) → video phải xếp hàng sau.
+ * Giới hạn số ảnh tải cùng lúc để luôn chừa kết nối cho video; ảnh đang hiện trên màn hình tải trước,
+ * ảnh tải trước (prefetch) chỉ chạy khi rảnh và không có video đang mở. */
+const IMGQ = { hi: [], lo: [], busy: new Set(), jobs: 0, io: null };
+const IMG_MAX = 4, IMG_MAX_VIDEO = 2, IMG_STUCK_MS = 15000;
+const videoModalOpen = () => !!document.getElementById('videoModal')?.classList.contains('open');
+const hoverPlaying = () => typeof HP !== 'undefined' && !!HP.el?.isConnected;
+function imgPump() {
+  for (const img of IMGQ.busy) if (!img.isConnected) { img.removeAttribute('src'); imgRelease(img); } // kết quả cũ đã bị thay: huỷ tải
+  const modal = videoModalOpen(), max = modal ? IMG_MAX_VIDEO : IMG_MAX;
+  while (IMGQ.busy.size + IMGQ.jobs < max) {
+    const img = IMGQ.hi.shift();
+    if (img) { delete img.dataset.qw; if (img.isConnected && img.dataset.src) imgStart(img); continue; }
+    if (modal || hoverPlaying()) break; // đang xem video: không tải trước
+    const job = IMGQ.lo.shift(); if (!job) break;
+    IMGQ.jobs++;
+    job().catch(() => {}).finally(() => { IMGQ.jobs--; imgPump(); });
+  }
+}
+function imgStart(img) {
+  IMGQ.io?.unobserve(img);
+  IMGQ.busy.add(img);
+  const done = () => imgRelease(img);
+  img.addEventListener('load', done, { once: true });
+  // lỗi: bộ bắt lỗi chung chuyển sang route API (vẫn giữ lượt); tới ảnh hỏng hoặc ảnh đã bị gỡ thì trả lượt
+  img.addEventListener('error', () => { if (!img.isConnected || img.src === BROKEN_IMG) done(); });
+  setTimeout(done, IMG_STUCK_MS);
+  img.src = img.dataset.v ? frameUrl(img.dataset.v, img.dataset.f) : img.dataset.src;
+  delete img.dataset.src;
+}
+function imgRelease(img) { if (IMGQ.busy.delete(img)) imgPump(); }
+// Tải trước ở mức ưu tiên thấp: job() trả Promise, chỉ chạy khi hàng ảnh đang hiện đã trống.
+const lowPriority = job => new Promise(res => { IMGQ.lo.push(() => job().finally(res)); imgPump(); });
+function imgWatch(root) {
+  if (!IMGQ.io) {
+    IMGQ.io = new IntersectionObserver(entries => {
+      for (const e of entries) {
+        const img = e.target;
+        if (!img.dataset.src) { IMGQ.io.unobserve(img); continue; }
+        if (e.isIntersecting && !img.dataset.qw) { img.dataset.qw = '1'; IMGQ.hi.push(img); }
+        else if (!e.isIntersecting && img.dataset.qw) { delete img.dataset.qw; IMGQ.hi = IMGQ.hi.filter(x => x !== img); }
+      }
+      imgPump();
+    }, { rootMargin: '300px' });
+  }
+  const list = root.matches?.('img[data-src]') ? [root] : root.querySelectorAll ? root.querySelectorAll('img[data-src]') : [];
+  for (const img of list) IMGQ.io.observe(img);
+}
+new MutationObserver(muts => {
+  for (const m of muts) for (const n of m.addedNodes) if (n.nodeType === 1) imgWatch(n);
+  if (IMGQ.busy.size) imgPump();
+}).observe(document.documentElement, { childList: true, subtree: true });
+
+// Gán src cho <video>. Lỗi tải: chạy qua server.py thì thử lại đúng địa chỉ đó 1 lần (vd mạng máy vừa đổi —
+// server.py tự lấy từ backend nếu máy không có); không có server.py thì chuyển sang route API của backend.
 function setVideoSrc(el, v, t = 0, onFail) {
-  const fallback = apiVideoUrl(v);
-  el.dataset.v = v;
+  const primary = videoUrl(v), fallback = apiVideoUrl(v);
+  el.dataset.v = v; el.dataset.retry = '0';
   el.onerror = () => {
     if (el.dataset.v !== v) return;
-    if (el.src !== fallback) {
+    const pos = el.currentTime > 0.1 ? el.currentTime : t;
+    if (MEDIA.local && el.dataset.retry === '0') { el.dataset.retry = '1'; el.src = primary; el.load(); seekWhenReady(el, pos); return; }
+    if (!MEDIA.local && el.src !== fallback) {
       if (MEDIA.videos === null) MEDIA.videos = false;
-      el.src = fallback; el.load(); seekWhenReady(el, t);
-      if (el.dataset.play === '1') el.play().catch(() => {});
+      el.src = fallback; el.load(); seekWhenReady(el, pos);
     } else if (onFail) onFail();
   };
   el.onloadedmetadata = () => { if (el.src.includes('/media/videos/') && MEDIA.videos === null) MEDIA.videos = true; };
-  el.src = videoUrl(v);
+  el.src = primary;
   seekWhenReady(el, t);
 }
+// Tua xong rồi mới phát: có trình duyệt gọi play() rồi tua ngay khi vừa nạp thì tự dừng và quay về giây 0.
+// Phát hay không theo el.dataset.play ('1' = đang mở để xem).
 function seekWhenReady(el, t) {
-  if (!Number.isFinite(t)) return;
-  if (el.readyState >= 1) el.currentTime = t;
-  else el.addEventListener('loadedmetadata', () => { el.currentTime = t; }, { once: true });
+  const go = () => {
+    const wantPlay = () => { if (el.dataset.play === '1') el.play().catch(() => {}); };
+    if (Number.isFinite(t) && t > 0.05 && Math.abs(el.currentTime - t) > 0.05) {
+      el.addEventListener('seeked', wantPlay, { once: true });
+      el.currentTime = t;
+    } else wantPlay();
+  };
+  if (el.readyState >= 1) go(); else el.addEventListener('loadedmetadata', go, { once: true });
 }
 
 // FPS lấy từ backend metadata (GET /api/video-fps). Nếu lúc mở trang backend chưa sẵn sàng
@@ -620,7 +687,7 @@ function groupAction(btn) {
 }
 
 /* ════════════════════ 7. Hover → phát video ════════════════════ */
-const HP = { el: null, card: null, timer: 0, clip: [0, 0] };
+const HP = { el: null, card: null, timer: 0, unload: 0, clip: [0, 0] };
 const HOVER_DELAY = 220, CLIP_BEFORE = 2, CLIP_AFTER = 8;
 function hoverVideo() {
   if (HP.el) return HP.el;
@@ -637,6 +704,7 @@ function hoverVideo() {
 }
 function hoverStart(card) {
   hoverStop();
+  clearTimeout(HP.unload);
   HP.card = card;
   if (PV.alt || PV.mode) pvFromCard(card);
   if (!S.hoverPlay) return;
@@ -649,10 +717,9 @@ function hoverStart(card) {
     card.querySelector('.thumb').appendChild(v);
     card.classList.add('playing');
     v.dataset.play = '1';
-    if (v.dataset.v !== r.video_id) setVideoSrc(v, r.video_id, HP.clip[0]);
-    else seekWhenReady(v, HP.clip[0]);
     setRate(v, holdRate() || 1);
-    v.play().catch(() => {});
+    if (v.dataset.v !== r.video_id) setVideoSrc(v, r.video_id, HP.clip[0]);
+    else seekWhenReady(v, HP.clip[0]); // tua xong mới phát (seekWhenReady tự gọi play)
   }, HOVER_DELAY);
 }
 function hoverStop() {
@@ -661,8 +728,13 @@ function hoverStop() {
     HP.card.classList.remove('playing');
     const bar = HP.card.querySelector('.vprog'); if (bar) bar.style.width = '0';
   }
-  if (HP.el) { HP.el.dataset.play = '0'; HP.el.pause(); HP.el.classList.remove('on'); HP.el.remove(); }
+  if (HP.el) {
+    HP.el.dataset.play = '0'; HP.el.pause(); HP.el.classList.remove('on'); HP.el.remove();
+    clearTimeout(HP.unload); // 4 giây không rê lại → bỏ video để trả kết nối cho trình duyệt
+    HP.unload = setTimeout(() => { if (!HP.card && HP.el) { HP.el.removeAttribute('src'); HP.el.load(); delete HP.el.dataset.v; } }, 4000);
+  }
   HP.card = null;
+  imgPump();
 }
 
 /* ════════════════════ 8. OCR / ASR trên K kết quả ════════════════════ */
@@ -670,7 +742,7 @@ const TX = { data: new Map(), pending: new Map(), q: '', terms: [], src: 'all', 
 
 async function fetchOcr(v) {
   try {
-    const r = await fetch(`${CFG.backend}/api/videos/${enc(v)}/ocr`);
+    const r = await fetch(`${CFG.backend}/api/videos/${enc(v)}/ocr`, { signal: waitMs(12000) });
     if (!r.ok) return [];
     const list = await r.json();
     const fps = fps25(v);
@@ -696,7 +768,7 @@ async function fetchAsr(v) {
   const urls = [`${CFG.backend}/api/videos/${enc(v)}/asr`];
   if (MEDIA.asr !== false) urls.unshift(`${CFG.media}/media/asr/${enc(v)}.json`);
   for (const url of urls) {
-    try { const r = await fetch(url, { cache: 'no-store' }); if (r.ok) { const segs = normalizeAsr(await r.json()); if (segs.length) return segs; } } catch { /* thử nguồn tiếp theo */ }
+    try { const r = await fetch(url, { cache: 'no-store', signal: waitMs(12000) }); if (r.ok) { const segs = normalizeAsr(await r.json()); if (segs.length) return segs; } } catch { /* thử nguồn tiếp theo */ }
   }
   return [];
 }
@@ -804,7 +876,11 @@ function openOverlay(id) {
 }
 function closeOverlay(id) {
   $(id).classList.remove('open');
-  if (id === '#videoModal') $('#vmVideo').pause();
+  if (id === '#videoModal') { // dừng và bỏ video để trả kết nối cho trình duyệt
+    const el = $('#vmVideo');
+    el.dataset.play = '0'; el.pause(); el.removeAttribute('src'); el.load(); delete el.dataset.v;
+    imgPump(); // đóng video → tải tiếp ảnh
+  }
 }
 
 function openVideo(v, t = 0, opts = {}) {
@@ -825,8 +901,7 @@ function openVideo(v, t = 0, opts = {}) {
       if (VM.v === v && src) $('#vmBadge').textContent = `bắt đầu ${fmtTime(VM.t0, true)} · ${src === 'local' ? '📁 từ máy' : '☁ từ server'}`;
     }).catch(() => {});
   }
-  setRate(el, holdRate() || vmBaseRate());
-  el.play().catch(() => {});
+  setRate(el, holdRate() || vmBaseRate()); // video tự phát sau khi tua tới thời điểm bắt đầu (seekWhenReady)
   openOverlay('#videoModal');
   $('#inspQuery').value = opts.q || '';
   renderInspector();
@@ -1011,7 +1086,7 @@ const FS = { v: null, view: 'boundaries', frames: [], cur: null, cache: new Map(
 async function timeline(v, view) {
   const key = `${v}:${view}`;
   if (FS.cache.has(key)) return FS.cache.get(key);
-  const p = api(`/api/videos/${enc(v)}/frames?view=${view}`).then(env => {
+  const p = api(`/api/videos/${enc(v)}/frames?view=${view}`, { signal: waitMs(12000) }).then(env => {
     const list = (env.data || []).map(x => ({ f: Number(x.frame_id), t: Number(x.timestamp_seconds) })).filter(x => Number.isFinite(x.f));
     if (!list.length) throw new Error('không có frame');
     return list;
@@ -1196,6 +1271,8 @@ function renderCart() {
   const keys = new Set(S.cart.map(c => c.key));
   $$('#results .card-f').forEach(c => { const r = S.results[+c.dataset.i]; if (r) c.classList.toggle('in-cart', keys.has(`${r.video_id}/${r.frame_id}`)); });
   $('#trakeManual').hidden = t !== 'trake';
+  $('#qaManual').hidden = t !== 'vqa';
+  $('#kisManual').hidden = t !== 'kis';
   const u = S.trakeUndo, undo = $('#cartUndo');
   undo.hidden = !(t === 'trake' && u?.items?.length);
   if (!undo.hidden) {
@@ -1262,6 +1339,111 @@ async function tmAdd() {
     addToCart(it, true, true);
   }
   toast(`Đã thêm ${r.fs.length} frame của ${r.v} vào danh sách nộp.`, 'success');
+}
+/* ── Q&A nộp tay: Video ID + frame hoặc thời điểm + câu trả lời ── */
+// "2250" = frame · "1:30.5", "1:02:03", "90.5s" = thời gian. Trả { frame } hoặc { sec }.
+function parseMoment(s) {
+  const x = String(s || '').trim().toLowerCase().replace(/\s+/g, '');
+  if (!x) return null;
+  if (/^\d+$/.test(x)) return { frame: Number(x) };
+  const m = x.match(/^(\d+(?:\.\d+)?)s$/);
+  if (m) return { sec: Number(m[1]) };
+  if (/^\d+(:\d{1,2}){1,2}(\.\d+)?$/.test(x)) return { sec: x.split(':').reduce((a, p) => a * 60 + Number(p), 0) };
+  return null;
+}
+// Chưa bấm nộp nên chưa tra ID thật: đoán "L21-V001" ↔ "L21_V001" theo bảng FPS để xem trước đúng ms.
+function guessId(raw) {
+  const typed = String(raw || '').trim().replace(/\.(mp4|mov|mkv|webm|avi|m4v)$/i, '').toUpperCase();
+  return [typed, typed.replace(/-/g, '_'), typed.replace(/_/g, '-')].find(x => x in (FPS?.overrides || {})) || typed;
+}
+// Frame → ms theo FPS của video (giống nộp từ danh sách); thời gian → ms trực tiếp.
+function qmCalc(v, mo) {
+  const fps = fps25(v);
+  if (mo.frame != null) return { frame: mo.frame, sec: mo.frame / fps, ms: Math.round((mo.frame * 1000) / fps), byFrame: true };
+  return { frame: Math.round(mo.sec * fps), sec: mo.sec, ms: Math.round(mo.sec * 1000), byFrame: false };
+}
+function qmPreview() {
+  const raw = $('#qmVideo').value.trim(), tm = $('#qmTime').value.trim(), ans = $('#qmAnswer').value.trim(), el = $('#qmPreview');
+  const v = guessId(raw), mo = parseMoment(tm);
+  el.classList.remove('bad');
+  if (!raw && !tm && !ans) { el.textContent = 'Thời điểm: số frame (vd 2250) hoặc thời gian (vd 1:30.5 / 90.5s).'; return; }
+  if (tm && !mo) { el.textContent = 'Thời điểm phải là số frame (2250) hoặc thời gian (1:30.5 / 90.5s).'; el.classList.add('bad'); return; }
+  const c = v && mo ? qmCalc(v, mo) : null;
+  el.textContent = `→ QA-${ans || '?'}-${v || '?'}-${c ? c.ms : '?'}`
+    + (c ? `   (frame ${c.frame} · ${fmtTime(c.sec, true)}${c.byFrame && !fpsOf(v) ? ' · tạm tính 25 fps' : ''})` : '')
+    + (ans.includes('-') ? '   ⚠ câu trả lời có dấu "-"' : '');
+}
+async function qmResolve() {
+  const raw = $('#qmVideo').value.trim(), mo = parseMoment($('#qmTime').value), ans = $('#qmAnswer').value.trim();
+  if (!raw) { toast('Nhập Video ID.', 'error'); $('#qmVideo').focus(); return null; }
+  if (!mo) { toast('Nhập thời điểm: số frame (vd 2250) hoặc thời gian (vd 1:30.5 / 90.5s).', 'error'); $('#qmTime').focus(); return null; }
+  if (!ans) { toast('Nhập câu trả lời Q&A.', 'error'); $('#qmAnswer').focus(); return null; }
+  const res = await resolveVideo(raw);
+  if (!res.found) { toast(notFoundMsg(raw, res), 'error', 5000); $('#qmVideo').focus(); return null; }
+  $('#qmVideo').value = res.id;
+  await fpsReady();
+  qmPreview();
+  return { v: res.id, ans, ...qmCalc(res.id, mo) };
+}
+async function qmSubmit() {
+  if (!dresLoggedIn()) { toast('Chưa đăng nhập DRES / chưa chọn evaluation.', 'error'); openDres(); return; }
+  const r = await qmResolve();
+  if (!r) return;
+  if (r.byFrame && !fpsOf(r.v)) toast('Chưa lấy được FPS của video này — tạm tính ms theo 25 fps.', 'error');
+  const text = `QA-${r.ans}-${r.v}-${r.ms}`;
+  await sendDres({ answerSets: [{ answers: [{ text }] }] }, `${r.v}/${r.frame}`, text); // có sẵn trong danh sách thì gỡ luôn
+}
+async function qmAdd() {
+  const r = await qmResolve();
+  if (!r) return;
+  const it = itemOf(r.v, r.frame, r.sec);
+  const kf = await nearestKeyframe(r.v, r.frame);
+  if (kf !== r.frame) { it.thumbFrame = kf; it.src = frameUrl(r.v, kf); }
+  S.answers[it.key] = r.ans;
+  const had = S.cart.some(c => c.key === it.key);
+  addToCart(it, true, true);
+  if (had) renderCart(); // đã có frame này: chỉ cập nhật câu trả lời
+  toast(`${had ? 'Đã cập nhật câu trả lời cho' : 'Đã thêm'} ${it.label} (${fmtTime(r.sec, true)}) vào danh sách nộp.`, 'success');
+}
+/* ── KIS nộp tay: Video ID + frame hoặc thời điểm → {mediaItemName, start = end} ── */
+function kmPreview() {
+  const raw = $('#kmVideo').value.trim(), tm = $('#kmTime').value.trim(), el = $('#kmPreview');
+  const v = guessId(raw), mo = parseMoment(tm);
+  el.classList.remove('bad');
+  if (!raw && !tm) { el.textContent = 'Thời điểm: số frame (vd 2250) hoặc thời gian (vd 1:30.5 / 90.5s).'; return; }
+  if (tm && !mo) { el.textContent = 'Thời điểm phải là số frame (2250) hoặc thời gian (1:30.5 / 90.5s).'; el.classList.add('bad'); return; }
+  const c = v && mo ? qmCalc(v, mo) : null;
+  el.textContent = `→ ${v || '?'} @ ${c ? c.ms : '?'} ms (start = end)`
+    + (c ? `   (frame ${c.frame} · ${fmtTime(c.sec, true)}${c.byFrame && !fpsOf(v) ? ' · tạm tính 25 fps' : ''})` : '');
+}
+async function kmResolve() {
+  const raw = $('#kmVideo').value.trim(), mo = parseMoment($('#kmTime').value);
+  if (!raw) { toast('Nhập Video ID.', 'error'); $('#kmVideo').focus(); return null; }
+  if (!mo) { toast('Nhập thời điểm: số frame (vd 2250) hoặc thời gian (vd 1:30.5 / 90.5s).', 'error'); $('#kmTime').focus(); return null; }
+  const res = await resolveVideo(raw);
+  if (!res.found) { toast(notFoundMsg(raw, res), 'error', 5000); $('#kmVideo').focus(); return null; }
+  $('#kmVideo').value = res.id;
+  await fpsReady();
+  kmPreview();
+  return { v: res.id, ...qmCalc(res.id, mo) };
+}
+async function kmSubmit() {
+  if (!dresLoggedIn()) { toast('Chưa đăng nhập DRES / chưa chọn evaluation.', 'error'); openDres(); return; }
+  const r = await kmResolve();
+  if (!r) return;
+  if (r.byFrame && !fpsOf(r.v)) toast('Chưa lấy được FPS của video này — tạm tính ms theo 25 fps.', 'error');
+  const answer = { mediaItemName: r.v, start: r.ms, end: r.ms }; // KIS / VKIS: start = end
+  await sendDres({ answerSets: [{ answers: [answer] }] }, `${r.v}/${r.frame}`, `${r.v} @ ${r.ms}ms (frame ${r.frame})`); // có sẵn trong danh sách thì gỡ luôn
+}
+async function kmAdd() {
+  const r = await kmResolve();
+  if (!r) return;
+  const it = itemOf(r.v, r.frame, r.sec);
+  const kf = await nearestKeyframe(r.v, r.frame);
+  if (kf !== r.frame) { it.thumbFrame = kf; it.src = frameUrl(r.v, kf); }
+  const had = S.cart.some(c => c.key === it.key);
+  addToCart(it, true, true);
+  toast(had ? `${it.label} đã có trong danh sách nộp.` : `Đã thêm ${it.label} (${fmtTime(r.sec, true)}) vào danh sách nộp.`, had ? 'info' : 'success');
 }
 function bindCart() {
   const list = $('#cartList');
@@ -1899,18 +2081,22 @@ function distinctVideos(rows, limit) {
 function prefetchVideos(rows, limit) {
   PF.vctl?.abort(); const ctl = PF.vctl = new AbortController();
   const queue = distinctVideos(rows, limit).map(x => x[0]).filter(v => !PF.warmed.has(v));
+  // Chạy trong hàng ưu tiên thấp (IMGQ): không giành kết nối của ảnh đang hiện và video đang mở.
   const worker = async () => {
     while (queue.length && !ctl.signal.aborted) {
       const v = queue.shift();
-      try {
-        const url = videoUrl(v);
-        const r = await fetch(url, { headers: { Range: 'bytes=0-2097151' }, cache: 'force-cache', signal: ctl.signal, priority: 'low' });
-        if (r.ok || r.status === 206) { await r.arrayBuffer(); PF.warmed.add(v); }
-        else if (r.status === 404 && url.includes('/media/videos/') && MEDIA.videos === null) { MEDIA.videos = false; queue.unshift(v); }
-      } catch { /* bỏ qua */ }
+      await lowPriority(async () => {
+        if (ctl.signal.aborted) return;
+        try {
+          const url = videoUrl(v);
+          const r = await fetch(url, { headers: { Range: 'bytes=0-2097151' }, cache: 'force-cache', signal: AbortSignal.any ? AbortSignal.any([ctl.signal, AbortSignal.timeout(10000)]) : ctl.signal, priority: 'low' });
+          if (r.ok || r.status === 206) { await r.arrayBuffer(); PF.warmed.add(v); }
+          else if (r.status === 404 && url.includes('/media/videos/') && MEDIA.videos === null) { MEDIA.videos = false; queue.unshift(v); }
+        } catch { /* bỏ qua */ }
+      });
     }
   };
-  Promise.all([worker(), worker()]).catch(() => {});
+  worker().catch(() => {});
 }
 function prefetchBoundaries(rows, limit, perVideo) {
   PF.bctl?.abort(); const ctl = PF.bctl = new AbortController();
@@ -1925,11 +2111,13 @@ function prefetchBoundaries(rows, limit, perVideo) {
     while (imgs.length && !ctl.signal.aborted) {
       const [v, f] = imgs.shift(), k = `${v}:${f}`;
       if (PF.warmedImg.has(k)) continue;
-      await new Promise(res => { const i = new Image(); i.onload = i.onerror = res; i.src = frameUrl(v, f); });
+      await lowPriority(() => ctl.signal.aborted ? Promise.resolve() : new Promise(res => {
+        const i = new Image(); i.onload = i.onerror = res; setTimeout(res, IMG_STUCK_MS); i.src = frameUrl(v, f);
+      }));
       PF.warmedImg.add(k);
     }
   };
-  Promise.all([tl(), tl(), tl()]).then(() => Promise.all([im(), im(), im(), im()])).catch(() => {});
+  Promise.all([tl(), tl(), tl()]).then(() => Promise.all([im(), im()])).catch(() => {});
 }
 
 /* ════════════════════ 17. Health, cài đặt, phím tắt ════════════════════ */
@@ -1940,7 +2128,7 @@ async function refreshHealth() {
   clearTimeout(CONN.timer);
   try {
     let r;
-    try { r = await fetch(`${CFG.backend}/health`, { cache: 'no-store' }); }
+    try { r = await fetch(`${CFG.backend}/health`, { cache: 'no-store', signal: waitMs(6000) }); }
     catch { CONN.kind = 'network'; throw new Error('trình duyệt không gọi được địa chỉ này (sai địa chỉ/cổng, backend tắt, hoặc bị chặn CORS)'); }
     if (!r.ok) {
       const body = await r.json().catch(() => null);
@@ -1948,7 +2136,7 @@ async function refreshHealth() {
       throw new Error(body ? errText(body, r.status) : `HTTP ${r.status}`);
     }
     let extra = '';
-    try { const s = await api('/api/stats'); if (s.data?.query_count != null) extra = ` — ${s.data.query_count} queries`; } catch { /* stats không bắt buộc */ }
+    try { const s = await api('/api/stats', { signal: waitMs(6000) }); if (s.data?.query_count != null) extra = ` — ${s.data.query_count} queries`; } catch { /* stats không bắt buộc */ }
     dot.className = 'dot ok'; dot.parentElement.title = dot.title = `API OK (${CFG.backend})${extra}`;
     if (CONN.ok === false) toast('Đã kết nối lại backend.', 'success');
     CONN.ok = true; CONN.err = '';
@@ -2270,8 +2458,19 @@ function init() {
   $('#tmAdd').onclick = tmAdd;
   ['#tmVideo', '#tmFrames'].forEach(sel => $(sel).addEventListener('input', tmPreview));
   $('#tmFrames').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); tmSubmit(); } });
+  $('#kmSubmit').onclick = kmSubmit;
+  $('#kmAdd').onclick = kmAdd;
+  ['#kmVideo', '#kmTime'].forEach(sel => $(sel).addEventListener('input', kmPreview));
+  $('#kmVideo').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('#kmTime').focus(); } });
+  $('#kmTime').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); kmSubmit(); } });
+  $('#qmSubmit').onclick = qmSubmit;
+  $('#qmAdd').onclick = qmAdd;
+  ['#qmVideo', '#qmTime', '#qmAnswer'].forEach(sel => $(sel).addEventListener('input', qmPreview));
+  $('#qmVideo').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('#qmTime').focus(); } });
+  $('#qmTime').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('#qmAnswer').focus(); } });
+  $('#qmAnswer').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); qmSubmit(); } });
   $('#vmGoto').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); vmGotoFrame(); } });
-  tmPreview();
+  tmPreview(); qmPreview(); kmPreview();
   $('#btnSubmit').onclick = () => submitDres();
   const share = $('#cartShare');
   const renderShare = () => { share.classList.toggle('on', S.cartShare); share.title = `Chia sẻ danh sách với team: ${S.cartShare ? 'BẬT' : 'TẮT'}`; };

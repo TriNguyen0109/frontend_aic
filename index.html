@@ -211,6 +211,19 @@
         <div class="tm-preview muted" id="tmPreview"></div>
         <div class="row"><button class="btn xs grow" id="tmAdd" title="Thêm các frame này vào danh sách nộp (để xem ảnh / kéo đổi thứ tự)">＋ Vào danh sách</button><button class="btn xs primary grow" id="tmSubmit" title="Nộp thẳng chuỗi TR-… lên DRES">✅ Nộp tay</button></div>
       </div>
+      <div class="tm" id="kisManual" hidden>
+        <div class="tm-title">✍ Nộp tay KIS</div>
+        <div class="row"><input id="kmVideo" placeholder="Video ID" spellcheck="false" autocomplete="off"><input id="kmTime" placeholder="frame hoặc 1:30.5" title="Số nguyên = frame (vd 2250) · có dấu : hoặc chữ s = thời gian (vd 1:30.5, 90.5s)" spellcheck="false" autocomplete="off"></div>
+        <div class="tm-preview muted" id="kmPreview"></div>
+        <div class="row"><button class="btn xs grow" id="kmAdd" title="Thêm frame này vào danh sách nộp">＋ Vào danh sách</button><button class="btn xs primary grow" id="kmSubmit" title="Nộp thẳng lên DRES: start = end (Enter ở ô thời điểm)">✅ Nộp tay</button></div>
+      </div>
+      <div class="tm" id="qaManual" hidden>
+        <div class="tm-title">✍ Nộp tay Q&amp;A</div>
+        <div class="row"><input id="qmVideo" placeholder="Video ID" spellcheck="false" autocomplete="off"><input id="qmTime" placeholder="frame hoặc 1:30.5" title="Số nguyên = frame (vd 2250) · có dấu : hoặc chữ s = thời gian (vd 1:30.5, 90.5s)" spellcheck="false" autocomplete="off"></div>
+        <div class="row"><input id="qmAnswer" placeholder="Câu trả lời…" maxlength="100" spellcheck="false" autocomplete="off"></div>
+        <div class="tm-preview muted" id="qmPreview"></div>
+        <div class="row"><button class="btn xs grow" id="qmAdd" title="Thêm frame này (kèm câu trả lời) vào danh sách nộp">＋ Vào danh sách</button><button class="btn xs primary grow" id="qmSubmit" title="Nộp thẳng chuỗi QA-… lên DRES (Enter ở ô câu trả lời)">✅ Nộp tay</button></div>
+      </div>
       <button class="btn sm undo" id="cartUndo" hidden></button>
       <button class="btn sm primary grow" id="cartSubmit">✅ Nộp bài</button>
     </div>

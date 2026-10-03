@@ -19,6 +19,7 @@ Tuỳ chọn:
 """
 import argparse
 import difflib
+import errno
 import http.client
 import json
 import os
@@ -36,6 +37,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DATA_ROOT = ROOT / "data"
 PROXY_PREFIXES = ("/api/", "/ws/", "/submission/")
+# Chỉ tìm kiếm / lưu bài mới được chờ backend lâu (DeepSeek có thể mất vài phút). Các yêu cầu phụ (health, OCR, ASR,
+# FPS, keyframe, ảnh, video dự phòng) chờ tối đa QUICK_TIMEOUT giây: backend treo thì báo lỗi nhanh, không giữ kết nối
+# của trình duyệt (Chrome chỉ mở 6 kết nối tới localhost:8082 — bị chiếm hết thì video ở máy cũng không tải được).
+SLOW_PREFIXES = ("/api/search/", "/api/submission/", "/submission/")
+QUICK_TIMEOUT, HEALTH_TIMEOUT, DOWN_HOLD = 8.0, 4.0, 10.0
+BACKEND_DOWN = {"until": 0.0, "why": ""}  # backend vừa treo / không kết nối được → các yêu cầu phụ trả 503 ngay trong DOWN_HOLD giây
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
        "te", "trailers", "transfer-encoding", "upgrade", "server", "date"}
 VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov"}
@@ -236,7 +243,9 @@ def local_frame(vid, frame):
         rescan_if_stale(wait=True)
     dirs = _lookup(FRAMES, FRAME_KEYS, vid)
     if not dirs:
-        rescan_if_stale()
+        # Máy không có keyframe → mọi ảnh sau khi search đều rơi vào đây. Quét lại ổ đĩa mỗi 30 giây
+        # làm ổ cứng (nhất là ổ HDD / ổ ngoài) bị đọc chen vào lúc đang phát video → chỉ quét lại sau 10 phút.
+        rescan_if_stale(max_age=600)
         return None
     for d in dirs:
         for name in (f"f_{frame:08d}.jpg", f"f_{frame:08d}.webp", f"{frame:05d}.jpg"):
@@ -248,11 +257,16 @@ def local_frame(vid, frame):
 
 def backend_has_video(vid):
     """True/False: backend có video này không. OSError nếu không kết nối được backend."""
-    conn = connect(BACKEND, 6)
+    if time.time() < BACKEND_DOWN["until"]:
+        raise OSError(f"backend đang không phản hồi ({BACKEND_DOWN['why']})")
+    conn = connect(BACKEND, QUICK_TIMEOUT)
     try:
         conn.request("GET", f"{BACKEND.path}/api/videos/{urllib.parse.quote(vid)}",
                      headers={"Host": BACKEND.netloc, "Range": "bytes=0-0"})
         return conn.getresponse().status in (200, 206)  # không đọc thân — chỉ cần mã trạng thái
+    except OSError as e:
+        BACKEND_DOWN.update(until=time.time() + DOWN_HOLD, why="quá thời gian chờ" if isinstance(e, socket.timeout) else str(e)[:60])
+        raise
     finally:
         conn.close()
 
@@ -557,7 +571,9 @@ class Handler(SimpleHTTPRequestHandler):
                 local = local_api(path, urllib.parse.urlsplit(self.path).query)
                 if local is not None:
                     return self._json(200, local, (("X-Source", "local"),))
-            return self._forward(BACKEND, BACKEND.path + self.path, ARGS.timeout)
+            if path.startswith(SLOW_PREFIXES):
+                return self._forward(BACKEND, BACKEND.path + self.path, ARGS.timeout)
+            return self._backend_quick(BACKEND.path + self.path, HEALTH_TIMEOUT if path == "/health" else QUICK_TIMEOUT, probe=path == "/health")
         if path.startswith("/dres/"):
             return self._dres(path)
         if path in ("/media", "/media/"):
@@ -566,12 +582,12 @@ class Handler(SimpleHTTPRequestHandler):
         m = re.fullmatch(r"/media/videos/([A-Za-z0-9_-]+)\.mp4", path)
         if m:
             p = local_video(m.group(1))
-            return self._file(p, "video/mp4") if p else self._forward(BACKEND, f"{BACKEND.path}/api/videos/{m.group(1)}", ARGS.timeout, source="server")
+            return self._file(p, "video/mp4") if p else self._backend_quick(f"{BACKEND.path}/api/videos/{m.group(1)}", QUICK_TIMEOUT, source="server")
         m = re.fullmatch(r"/media/frames/([A-Za-z0-9_-]+)/f_(\d+)\.jpg", path)
         if m:
             p = local_frame(m.group(1), int(m.group(2)))
             return self._file(p, IMG_TYPES.get(p.suffix.lower(), "image/jpeg")) if p else \
-                self._forward(BACKEND, f"{BACKEND.path}/api/frames/{m.group(1)}/{int(m.group(2))}", ARGS.timeout, source="server")
+                self._backend_quick(f"{BACKEND.path}/api/frames/{m.group(1)}/{int(m.group(2))}", QUICK_TIMEOUT, source="server")
         if path == "/media/dirs":  # GET: danh sách thư mục video · POST {"dirs": [...]}: lưu data/video_dirs.txt
             if self.command == "POST":
                 return self._save_dirs()
@@ -626,7 +642,15 @@ class Handler(SimpleHTTPRequestHandler):
         return self._json(200, dirs_info())
 
     # ── Chuyển tiếp HTTP (stream, giữ Range / 206) ──
-    def _forward(self, url, target, timeout, source=None, extra_headers=None, resp_headers=()):
+    def _backend_quick(self, target, timeout, source=None, probe=False):
+        """Yêu cầu phụ tới backend: chờ ngắn; backend vừa treo thì trả 503 ngay (probe=/health vẫn thử để biết khi nào sống lại)."""
+        if not probe and time.time() < BACKEND_DOWN["until"]:
+            if self.headers.get("Content-Length"):
+                self.rfile.read(int(self.headers["Content-Length"]))
+            return self._json(503, {"success": False, "error": f"Backend đang không phản hồi ({BACKEND_DOWN['why']}) — thử lại sau vài giây"})
+        return self._forward(BACKEND, target, timeout, source=source, quick=True)
+
+    def _forward(self, url, target, timeout, source=None, extra_headers=None, resp_headers=(), quick=False):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else None
         headers = {k: v for k, v in self.headers.items()
@@ -637,8 +661,12 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             conn.request(self.command, target, body=body, headers=headers)
             resp = conn.getresponse()
+            if url is BACKEND:
+                BACKEND_DOWN["until"] = 0.0  # backend trả lời được
         except OSError as e:
             conn.close()
+            if url is BACKEND and quick:
+                BACKEND_DOWN.update(until=time.time() + DOWN_HOLD, why="quá thời gian chờ" if isinstance(e, socket.timeout) else str(e)[:60])
             name = "DRES" if resp_headers else "backend"
             return self._json(502, {"success": False, "status": False,
                                     "error": f"server.py không kết nối được {name} {url.scheme}://{url.netloc}: {e}",
@@ -755,6 +783,26 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
 
 
+class DualStackServer(Server):
+    """Nghe cả IPv6 lẫn IPv4. Trình duyệt trên Windows gọi 'localhost' thử IPv6 (::1) trước — server chỉ nghe
+    IPv4 thì mỗi request phải chờ 50–300 ms mới quay sang 127.0.0.1 (mỗi lần tua video, mỗi ảnh đều chậm)."""
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
+
+
+def make_server(port, handler):
+    if socket.has_ipv6:
+        try:
+            return DualStackServer(("::", port), handler)
+        except OSError as e:
+            if e.errno in (errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", -1)) or getattr(e, "winerror", 0) == 10048:
+                raise  # cổng đang bị chiếm: báo lỗi luôn, không thử IPv4
+    return Server(("0.0.0.0", port), handler)  # máy không có IPv6
+
+
 def check_backend():
     try:
         conn = connect(BACKEND, 4)
@@ -773,7 +821,7 @@ if __name__ == "__main__":
     for b in ("batch1", "batch2", "meta"):
         (DATA_ROOT / b).mkdir(parents=True, exist_ok=True)
     try:
-        httpd = Server(("0.0.0.0", ARGS.port), partial(Handler, directory=str(ROOT)))
+        httpd = make_server(ARGS.port, partial(Handler, directory=str(ROOT)))
     except OSError as e:
         sys.exit(f"Không mở được cổng {ARGS.port} ({e}).\n"
                  f"Có thể server.py/serve.py cũ vẫn đang chạy: tắt cửa sổ đó (Ctrl+C) hoặc chạy python server.py --port 8090")

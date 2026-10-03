@@ -233,7 +233,7 @@ body.cart-wide .citem.drop-after { box-shadow: inset -3px 0 0 var(--cyan); }
 .tm { display: flex; flex-direction: column; gap: 3px; padding: .3rem; border: 1px dashed var(--line); border-radius: var(--r); }
 .tm-title { font-size: .7rem; font-weight: 700; color: var(--text-2); }
 .tm .row input { flex: 1; min-width: 0; padding: .22rem .35rem; font-size: .74rem; font-family: var(--mono); }
-.tm .row input#tmVideo { flex: 0 0 38%; }
+.tm .row input#tmVideo, .tm .row input#qmVideo, .tm .row input#kmVideo { flex: 0 0 38%; }
 .tm-preview { font-family: var(--mono); font-size: .68rem; word-break: break-all; min-height: 1em; }
 .tm-preview.bad { color: #f87171; }
 .btn.undo { border: 1px dashed var(--gold); color: var(--gold); background: transparent; }
